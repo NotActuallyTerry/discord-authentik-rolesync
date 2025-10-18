@@ -1,8 +1,11 @@
+import concurrent.futures
 import logging
 import os
 
 import discord
-from keycloak import KeycloakAdmin
+import authentik_client
+
+import asyncio
 
 
 dt_fmt = '%Y-%m-%d %H:%M:%S'
@@ -15,14 +18,15 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logger.addHandler(handler)
 
+AuthentikConfig = authentik_client.Configuration(
+    host=os.environ["AUTHENTIK_HOST"],
+    access_token=os.environ["AUTHENTIK_API_KEY"]
+)
 
-KeycloakClient = KeycloakAdmin(
-            server_url=os.environ["KEYCLOAK_URL"],
-            username=os.environ["KEYCLOAK_USERNAME"],
-            password=os.environ["KEYCLOAK_PASSWORD"],
-            realm_name=os.environ["KEYCLOAK_REALM"],
-            user_realm_name=os.environ["KEYCLOAK_ADMIN_REALM"])
+AuthentikClient = authentik_client.ApiClient(AuthentikConfig)
+AuthentikCoreApi = authentik_client.CoreApi(AuthentikClient)
 
+DISCORD_GUILD_ID: int = int(os.environ["DISCORD_GUILD_ID"])
 
 # We require the Members intent to receive updates to role membership
 intents = discord.Intents.default()
@@ -31,71 +35,48 @@ intents.members = True
 DiscordClient = discord.Client(intents=intents)
 
 
-def get_linked_groups(client: KeycloakAdmin = None) -> list:
+def get_linked_groups(client: authentik_client.CoreApi = None) -> list:
     """
-    Get all Keycloak groups that have the required attributes for linking to a Discord role
-    :param client: A KeycloakAdmin instance configured for your realm
+    Get all Authentik groups that have the required attribute for linking to a Discord role
+    :param client: A CoreApi instance configured for your Authentik instance
     :rtype: list
-    :return: A list of groups with the required attributes
+    :return: A list of groups with the required attribute
     """
 
-    # Keycloak paginates the response on the Admin API endpoints
-    # Therefore, we'll need to make sure we grab every group
-    page_start = 0
-    page_size = 100
-    all_groups = []
-
-    # Grab the first page of groups and add them to the list of groups
-    # We're setting briefRepresentation to false, so it'll return the groups' attributes
-    # These will be useful later on
-    groups = client.get_groups(
-        query={"briefRepresentation": "false",
-               "first": page_start,
-               "max": page_size}
+    # We could keep paginating until we cover all groups
+    # ooooor we could just search for 250 groups
+    groups = client.core_groups_list(
+        page_size=250,
+        include_users=False
     )
-    all_groups += groups
 
-    # Check if the size of the page matches what page size we asked for
-    # If it does, request the next page and add them to the list of groups
-    # Keep going until the page size doesn't match the requested page size
-    while len(groups) == page_size:
-        page_start += page_size
-        groups = client.get_groups(
-            query={"briefRepresentation": "false",
-                   "first": page_start,
-                   "max": page_size}
-        )
-        all_groups += groups
-
-    # Create a list of all groups with the required Keycloak attributes
     valid_groups = []
 
-    for group in all_groups:
+    for group in groups.results:
         try:
-            if group["attributes"]["discord-guild"] and group["attributes"]["discord-role"]:
+            if group.attributes["discord_role_id"]:
                 valid_groups.append(group)
         except KeyError:
 
-            # If the group doesn't have the required attributes, it'll throw a KeyError
+            # If the group doesn't have the required attribute, it'll throw a KeyError
             # We can just catch and kill the error :)
             pass
 
     return valid_groups
 
 
-def get_linked_role(client: discord.client.Client = None, group: dict = None) -> discord.Role | None:
+def get_linked_role(client: discord.client.Client = None, group: authentik_client.Group = None) -> discord.Role | None:
     """
-    Get the Discord role that is linked to a Keycloak group
+    Get the Discord role that is linked to an Authentik group
     :param client: A Discord Client instance
-    :param group: A dict containing a Keycloak group with attributes `discord-guild` and `discord-role`
+    :param group: A dict containing an Authentik group with the attribute `discord_role_id`
     :rtype: discord.Role | None
     :return: The Discord role linked to the provided Keycloak group
     """
 
-    guild_id = int(group["attributes"]["discord-guild"][0])
-    role_id = int(group["attributes"]["discord-role"][0])
+    role_id = int(group.attributes["discord_role_id"])
 
-    guild = client.get_guild(guild_id)
+    guild = client.get_guild(DISCORD_GUILD_ID)
     if guild is None:
         return None
 
@@ -105,102 +86,59 @@ def get_linked_role(client: discord.client.Client = None, group: dict = None) ->
 
     return role
 
+def synchronise_group(client: authentik_client.CoreApi = None, groups: list = None) -> None:
+    for group in groups:
+        role = get_linked_role(client=DiscordClient, group=group)
+        if not role:
+            continue
 
-def get_group_members(client: KeycloakAdmin = None, group_id: str = None) -> list:
-    """
-    Get the users that are in the Keycloak group
-    :param client: A :class:`KeycloakAdmin` client
-    :param group_id: A :class:`str` with the group's UUID in Keycloak
-    :rtype: list
-    :return: A :class:`list` containing all users in the group
-    """
+        logger.info(f'Syncing Authentik group {group.name} with Discord role {role.name}')
 
-    # See comments in the get_linked_groups function for how we're handling Keycloak's Admin API pagination
-    page_start = 0
-    page_size = 100
-    members = []
+        # Add users to the Keycloak group if they're a part of the Discord role
+        for discord_user in role.members:
+            authentik_user = client.core_users_list(
+                attributes=('{"discord": {"id": "%s"}}' % discord_user.id)
+            )
 
-    group_members = client.get_group_members(
-        group_id=group_id,
-        query={"first": page_start, "max": page_size}
-    )
-    members += group_members
+            if len(authentik_user.results) == 0:
+                continue
 
-    while len(group_members) == page_size:
-        page_start += page_size
-        group_members = client.get_group_members(
-            group_id=group_id,
-            query={"first": page_start, "max": page_size}
-        )
-        members += group_members
+            if authentik_user.results[0].pk in group.users:
+                continue
 
-    return members
+            logger.info("Adding %s (%s) to Authentik group %s" % (
+                authentik_user.results[0].username, discord_user.global_name, group.name))
 
+            user_acct_request = authentik_client.models.UserAccountRequest(
+                pk=authentik_user.results[0].pk
+            )
 
-def get_discord_id(client: KeycloakAdmin = None, user_id: str = None) -> int:
-    """
-    Gets the Discord ID from the user's Keycloak profile
-    This only works if the Keycloak realm has Discord set up
-    as an Identity provider.
-    :param client: A KeycloakAdmin client
-    :param user_id: The user's UUID in Keycloak
-    :rtype: int
-    :return: The user's Discord ID
-    """
+            client.core_groups_add_user_create(group.pk, user_acct_request)
 
-    profile = client.get_user(user_id=user_id)
-    discord_id = None
+        # Remove users from the Keycloak group if they're not a part of the Discord role
+        if group.users_obj:
+            for authentik_user in group.users_obj:
+                discord_id = authentik_user.attributes["discord"]["id"]
 
-    for provider in profile["federatedIdentities"]:
-        if provider["identityProvider"] == "discord":
-            discord_id = provider["userId"]
+                if discord_id not in [user.id for user in role.members]:
+                    discord_user = DiscordClient.get_guild(role.guild.id).get_member(discord_id)
+                    logger.info("Removing %s (%s) from Authentik group %s" % (
+                        authentik_user.username, discord_user.global_name, group.name))
 
-    if not discord_id:
-        raise Exception("Cannot find Github username")
+                    user_acct_request = authentik_client.models.UserAccountRequest(
+                        pk=authentik_user.results[0].pk
+                    )
 
-    return int(discord_id)
+                    client.core_groups_remove_user_create(group.pk, user_acct_request)
+    logger.info("Finished initial group sync")
 
 
 @DiscordClient.event
 async def on_ready():
     logger.info(f'We have logged in as {DiscordClient.user}')
 
-    groups = get_linked_groups(client=KeycloakClient)
-
-    for group in groups:
-        role = get_linked_role(client=DiscordClient, group=group)
-        if not role:
-            continue
-
-        logger.info(f'Syncing Keycloak group {group["name"]} with Discord role {role.name}')
-        group_members = get_group_members(client=KeycloakClient, group_id=group["id"])
-
-        # Add users to the Keycloak group if they're a part of the Discord role
-        for discord_user in role.members:
-            keycloak_user = KeycloakClient.get_users(
-                query={"idpUserId": discord_user.id, "idpAlias": "discord"})
-
-            if len(keycloak_user) == 0:
-                continue
-
-            if keycloak_user[0]["id"] in [user["id"] for user in group_members]:
-                continue
-
-            logger.info("Adding %s (%s) to Keycloak group %s" % (
-                    keycloak_user[0]["username"], discord_user.global_name, group["name"]))
-
-            KeycloakClient.group_user_add(user_id=keycloak_user[0]["id"], group_id=group["id"])
-
-        # Remove users from the Keycloak group if they're not a part of the Discord role
-        for keycloak_user in group_members:
-            discord_id = get_discord_id(client=KeycloakClient, user_id=keycloak_user["id"])
-
-            if discord_id not in [user.id for user in role.members]:
-                discord_user = DiscordClient.get_guild(role.guild.id).get_member(discord_id)
-                logger.info("Removing %s (%s) from Keycloak group %s" % (
-                        keycloak_user["username"], discord_user.global_name, group["name"]))
-
-                KeycloakClient.group_user_remove(user_id=keycloak_user["id"], group_id=group["id"])
+    groups = get_linked_groups(client=AuthentikCoreApi)
+    await asyncio.to_thread(synchronise_group, client=AuthentikCoreApi, groups=groups)
 
 
 @DiscordClient.event
@@ -223,35 +161,43 @@ async def on_member_update(previous, current):
     if current_roles == previous_roles:
         return
 
-    keycloak_user = KeycloakClient.get_users(
-        query={"idpUserId": previous.id, "idpAlias": "discord"})
+    authentik_user = AuthentikCoreApi.core_users_list(
+        attributes=('{"discord": {"id": "%s"}}' % previous.id))
 
-    # If there isn't a Keycloak user, we can't really action anything
+    # If there isn't an Authentik user, we can't really action anything
     # They should've been cleaned up in the sync performed at launch
-    if len(keycloak_user) == 0:
+    if len(authentik_user.results) == 0:
         return
 
     # Process all Discord roles the user has been added to
     if len(added_roles) > 0:
         for role in added_roles:
-            keycloak_group = KeycloakClient.get_groups(
-                query={"q": "discord-role:%s" % role.id, "exact": "true"})
+            authentik_group = AuthentikCoreApi.core_groups_list(
+                attributes=('{"discord_role_id": "%s"}' % role.id))
 
-            logger.info('Adding %s (%s) to Keycloak group %s' % (
-                    keycloak_user[0]["username"], current.global_name, keycloak_group[0]["name"]))
+            logger.info('Adding %s (%s) to Authentik group %s' % (
+                    authentik_user.results[0].username, current.global_name, authentik_group.results[0].name))
 
-            KeycloakClient.group_user_add(user_id=keycloak_user[0]["id"], group_id=keycloak_group[0]["id"])
+            user_acct_request = authentik_client.models.UserAccountRequest(
+                pk=authentik_user.results[0].pk
+            )
+
+            AuthentikCoreApi.core_groups_add_user_create(authentik_group.results[0].pk, user_acct_request)
 
     # Process all Discord roles the user was removed from
     if len(removed_roles) > 0:
         for role in removed_roles:
-            keycloak_group = KeycloakClient.get_groups(
-                query={"q": "discord-role:%s" % role.id, "exact": "true"})
+            authentik_group = AuthentikCoreApi.core_groups_list(
+                attributes=('{"discord_role_id": "%s"}' % role.id))
 
-            logger.info('Removing %s (%s) from Keycloak group %s' % (
-                    keycloak_user[0]["username"], current.global_name, keycloak_group[0]["name"]))
+            logger.info('Removing %s (%s) from Authentik group %s' % (
+                    authentik_user.results[0].username, current.global_name, authentik_group.results[0].name))
 
-            KeycloakClient.group_user_remove(user_id=keycloak_user[0]["id"], group_id=keycloak_group[0]["id"])
+            user_acct_request = authentik_client.models.UserAccountRequest(
+                pk=authentik_user.results[0].pk
+            )
+
+            AuthentikCoreApi.core_groups_remove_user_create(authentik_group.results[0].pk, user_acct_request)
 
 
 DiscordClient.run(token=os.environ["DISCORD_BOT_TOKEN"], log_handler=handler, log_formatter=formatter)

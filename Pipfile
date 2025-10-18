@@ -6,7 +6,8 @@ name = "pypi"
 [packages]
 python-dotenv = "1.0.1"
 python-keycloak = "4.2.0"
-discord.py = "2.4.0"
+authentik-client = "2025.8.4"
+discord-py = "2.6.3"
 
 [dev-packages]
 
