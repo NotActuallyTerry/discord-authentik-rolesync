@@ -4,7 +4,7 @@
 FROM debian:12-slim AS builder
 
 RUN apt-get update && apt-get install --no-install-suggests --no-install-recommends --yes pipenv
-ADD https://github.com/pyenv/pyenv.git#v2.4.5 /pyenv/
+ADD https://github.com/pyenv/pyenv.git#v2.6.11 /pyenv/
 
 
 # Stage 2: Configure the Python venv
