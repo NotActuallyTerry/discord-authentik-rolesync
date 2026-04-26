@@ -4,10 +4,8 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-python-dotenv = "1.0.1"
-python-keycloak = "4.2.0"
-authentik-client = "2025.8.4"
-discord-py = "2.6.3"
+authentik-client = "2026.2.1"
+discord-py = "2.7.1"
 
 [dev-packages]
 
