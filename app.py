@@ -25,6 +25,7 @@ AuthentikConfig = authentik_client.Configuration(
 
 AuthentikClient = authentik_client.ApiClient(AuthentikConfig)
 AuthentikCoreApi = authentik_client.CoreApi(AuthentikClient)
+AuthentikSourcesApi = authentik_client.SourcesApi(AuthentikClient)
 
 DISCORD_GUILD_ID: int = int(os.environ["DISCORD_GUILD_ID"])
 
@@ -94,7 +95,7 @@ def synchronise_group(client: authentik_client.CoreApi = None, groups: list = No
 
         logger.info(f'Syncing Authentik group {group.name} with Discord role {role.name}')
 
-        # Add users to the Keycloak group if they're a part of the Discord role
+        # Add users to the Authentik group if they're a part of the Discord role
         for discord_user in role.members:
             authentik_user = client.core_users_list(
                 attributes=('{"discord": {"id": "%s"}}' % discord_user.id)
@@ -115,7 +116,7 @@ def synchronise_group(client: authentik_client.CoreApi = None, groups: list = No
 
             client.core_groups_add_user_create(group.pk, user_acct_request)
 
-        # Remove users from the Keycloak group if they're not a part of the Discord role
+        # Remove users from the Authentik group if they're not a part of the Discord role
         if group.users_obj:
             for authentik_user in group.users_obj:
                 discord_id = authentik_user.attributes["discord"]["id"]
@@ -161,13 +162,22 @@ async def on_member_update(previous, current):
     if current_roles == previous_roles:
         return
 
-    authentik_user = AuthentikCoreApi.core_users_list(
-        attributes=('{"discord": {"id": "%s"}}' % previous.id))
+    authentik_user_id = AuthentikSourcesApi.sources_user_connections_oauth_list(
+        source__slug="discord",
+        search=str(previous.id))
 
     # If there isn't an Authentik user, we can't really action anything
     # They should've been cleaned up in the sync performed at launch
-    if len(authentik_user.results) == 0:
+    if len(authentik_user_id.results) == 0:
+        logger.debug("No authentik users found for Discord ID %s (%s)" % (previous.id, current.global_name))
         return
+
+    authentik_user = AuthentikCoreApi.core_users_retrieve(
+        id=authentik_user_id.results[0].user)
+
+    if authentik_user.username is None:
+        logger.debug("Authentik user with ID of % not found, something has gone terribly wrong"
+                       % authentik_user_id.results[0].user)
 
     # Process all Discord roles the user has been added to
     if len(added_roles) > 0:
@@ -176,10 +186,10 @@ async def on_member_update(previous, current):
                 attributes=('{"discord_role_id": "%s"}' % role.id))
 
             logger.info('Adding %s (%s) to Authentik group %s' % (
-                    authentik_user.results[0].username, current.global_name, authentik_group.results[0].name))
+                    authentik_user.username, current.global_name, authentik_group.results[0].name))
 
             user_acct_request = authentik_client.models.UserAccountRequest(
-                pk=authentik_user.results[0].pk
+                pk=authentik_user.pk
             )
 
             AuthentikCoreApi.core_groups_add_user_create(authentik_group.results[0].pk, user_acct_request)
@@ -191,10 +201,10 @@ async def on_member_update(previous, current):
                 attributes=('{"discord_role_id": "%s"}' % role.id))
 
             logger.info('Removing %s (%s) from Authentik group %s' % (
-                    authentik_user.results[0].username, current.global_name, authentik_group.results[0].name))
+                    authentik_user.username, current.global_name, authentik_group.results[0].name))
 
             user_acct_request = authentik_client.models.UserAccountRequest(
-                pk=authentik_user.results[0].pk
+                pk=authentik_user.pk
             )
 
             AuthentikCoreApi.core_groups_remove_user_create(authentik_group.results[0].pk, user_acct_request)
