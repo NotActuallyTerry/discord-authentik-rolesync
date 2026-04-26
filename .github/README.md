@@ -7,11 +7,12 @@ For this to work you need to:
 2. Create a User Property Mapping that stores their Discord ID as an attribute, under `attributes.discord.id`
 3. Add a `discord_role_id` attribute to each Authentik group you'd like to sync, e.g. `discord_role_id: "940183386595655771"`
 NOTE: Make sure to enclose the ID in quotes, otherwise Authentik will round the number & break the link!
-4. Create an Authentik service account & assign them the following permissions:
+4. Create an Authentik service account, create a role & assign it the following permissions:
    - `Add user to group`
    - `Remove user from group`
    - `Can view Group`
    - `Can view User`
+   - `Can view User OAuth Source Connection`
 5. Create an API key (under Tokens and App passwords), assigning it to the above service account
 6. Create a Discord Application ([here](https://discord.com/developers/applications)) & add the bot to your server.
    - Make sure it has the Server Members intent, otherwise it won't receive role membership updates
