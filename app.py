@@ -1,12 +1,9 @@
-import concurrent.futures
+import asyncio
 import logging
 import os
 
-import discord
 import authentik_client
-
-import asyncio
-
+import discord
 
 dt_fmt = '%Y-%m-%d %H:%M:%S'
 formatter = logging.Formatter('[{asctime}] [{levelname:<8}] {name}: {message}', dt_fmt, style='{')
@@ -36,7 +33,7 @@ intents.members = True
 DiscordClient = discord.Client(intents=intents)
 
 
-def get_linked_groups(client: authentik_client.CoreApi = None) -> list:
+def get_linked_groups(client: authentik_client.CoreApi) -> list:
     """
     Get all Authentik groups that have the required attribute for linking to a Discord role
     :param client: A CoreApi instance configured for your Authentik instance
@@ -66,13 +63,13 @@ def get_linked_groups(client: authentik_client.CoreApi = None) -> list:
     return valid_groups
 
 
-def get_linked_role(client: discord.client.Client = None, group: authentik_client.Group = None) -> discord.Role | None:
+def get_linked_role(client: discord.client.Client, group: authentik_client.Group) -> discord.Role | None:
     """
     Get the Discord role that is linked to an Authentik group
     :param client: A Discord Client instance
     :param group: A dict containing an Authentik group with the attribute `discord_role_id`
     :rtype: discord.Role | None
-    :return: The Discord role linked to the provided Keycloak group
+    :return: The Discord role linked to the provided Authentik group
     """
 
     role_id = int(group.attributes["discord_role_id"])
@@ -143,8 +140,8 @@ async def on_ready():
 
 
 @DiscordClient.event
-async def on_member_update(previous, current):
-    if current.id == DiscordClient.user.id:
+async def on_member_update(previous: discord.Member, current: discord.Member):
+    if current.bot:
         return
 
     # Create sets of the roles a user previously had and currently has
@@ -152,15 +149,15 @@ async def on_member_update(previous, current):
     previous_roles = set(previous.roles)
     current_roles = set(current.roles)
 
+    # If the sets are the same, the member update was for something else
+    if current_roles == previous_roles:
+        return
+
     # If a role exists in the current set but not the previous set, it was added
     added_roles = current_roles.difference(previous_roles)
 
     # If a role existed in the previous set but not the current set, it was removed
     removed_roles = previous_roles.difference(current_roles)
-
-    # If the sets are the same, the member update was for something else
-    if current_roles == previous_roles:
-        return
 
     authentik_user_id = AuthentikSourcesApi.sources_user_connections_oauth_list(
         source__slug="discord",
