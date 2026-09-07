@@ -109,6 +109,22 @@ def synchronise_group(client: authentik_client.CoreApi, sources: authentik_clien
             )
 
 
+            if discord_user.avatar is not None:
+                current_url = None
+                try:
+                    current_url = authentik_user.attributes.get("avatar_url")
+                except AttributeError:
+                    pass
+
+                if current_url is None or current_url != discord_user.avatar.with_size(256).url:
+                    logger.info(f"Updating avatar for {discord_user.global_name}")
+
+                    patched_user_request = authentik_client.models.PatchedUserRequest(
+                        attributes={"avatar_url": discord_user.avatar.with_size(256).url},
+                    )
+                    AuthentikCoreApi.core_users_partial_update(id=authentik_user.pk,
+                                                               patched_user_request=patched_user_request)
+
             if authentik_user.pk in group.users:
                 continue
 
@@ -212,6 +228,32 @@ async def on_member_update(previous: discord.Member, current: discord.Member):
             )
 
             AuthentikCoreApi.core_groups_remove_user_create(authentik_group.results[0].pk, user_acct_request)
+
+
+@DiscordClient.event
+async def on_user_update(previous: discord.User, current: discord.User):
+    if previous.avatar != current.avatar:
+        authentik_user_id = AuthentikSourcesApi.sources_user_connections_oauth_list(
+            source__slug="discord",
+            search=str(previous.id))
+
+        if len(authentik_user_id.results) == 0:
+            logger.debug("No authentik users found for Discord ID %s (%s)" % (previous.id, current.global_name))
+            return
+
+        if not current.avatar:
+            logger.info("%s (%s) removed their avatar. Removing avatar from Authentik..")
+            patched_user_request = authentik_client.models.PatchedUserRequest(
+                attributes={"avatar_url": None},
+            )
+            AuthentikCoreApi.core_users_partial_update(id=authentik_user_id.results[0].pk, patched_user_request=patched_user_request)
+            return
+
+        logger.info("%s (%s) updated their avatar. Updating avatar in Authentik..")
+        patched_user_request = authentik_client.models.PatchedUserRequest(
+            attributes={"avatar_url": current.avatar.with_size(256).url},
+        )
+        AuthentikCoreApi.core_users_partial_update(id=authentik_user_id.results[0].pk, patched_user_request=patched_user_request)
 
 
 DiscordClient.run(token=os.environ["DISCORD_BOT_TOKEN"], log_handler=handler, log_formatter=formatter)
