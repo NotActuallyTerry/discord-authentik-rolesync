@@ -84,7 +84,7 @@ def get_linked_role(client: discord.client.Client, group: authentik_client.Group
 
     return role
 
-def synchronise_group(client: authentik_client.CoreApi = None, groups: list = None) -> None:
+def synchronise_group(client: authentik_client.CoreApi, sources: authentik_client.SourcesApi, groups: list) -> None:
     for group in groups:
         role = get_linked_role(client=DiscordClient, group=group)
         if not role:
@@ -94,21 +94,28 @@ def synchronise_group(client: authentik_client.CoreApi = None, groups: list = No
 
         # Add users to the Authentik group if they're a part of the Discord role
         for discord_user in role.members:
-            authentik_user = client.core_users_list(
-                attributes=('{"discord": {"id": "%s"}}' % discord_user.id)
+            if discord_user.bot:
+                continue
+
+            authentik_user_conn = sources.sources_user_connections_oauth_list(
+                source__slug="discord", search=str(discord_user.id)
             )
 
-            if len(authentik_user.results) == 0:
+            if len(authentik_user_conn.results) == 0:
                 continue
 
-            if authentik_user.results[0].pk in group.users:
+            authentik_user = AuthentikCoreApi.core_users_retrieve(
+                id=authentik_user_conn.results[0].user
+            )
+
+
+            if authentik_user.pk in group.users:
                 continue
 
-            logger.info("Adding %s (%s) to Authentik group %s" % (
-                authentik_user.results[0].username, discord_user.global_name, group.name))
+            logger.info(f"Adding {discord_user.global_name} to Authentik group {group.name}")
 
             user_acct_request = authentik_client.models.UserAccountRequest(
-                pk=authentik_user.results[0].pk
+                pk=authentik_user.pk
             )
 
             client.core_groups_add_user_create(group.pk, user_acct_request)
@@ -136,7 +143,7 @@ async def on_ready():
     logger.info(f'We have logged in as {DiscordClient.user}')
 
     groups = get_linked_groups(client=AuthentikCoreApi)
-    await asyncio.to_thread(synchronise_group, client=AuthentikCoreApi, groups=groups)
+    await asyncio.to_thread(synchronise_group, client=AuthentikCoreApi, sources=AuthentikSourcesApi, groups=groups)
 
 
 @DiscordClient.event
