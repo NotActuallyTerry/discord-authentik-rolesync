@@ -1,0 +1,9 @@
+[project]
+name = "discord-authentik-rolesync"
+version = "0.1.0"
+dependencies = [
+    "authentik-client==2026.8.1",
+    "discord-py==2.7.1"
+]
+
+requires-python = ">=3.12,<3.13"
