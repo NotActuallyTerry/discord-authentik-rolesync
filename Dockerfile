@@ -1,28 +1,19 @@
-# Stage 1: Set up the build envrionment
-# Do this in a separate stage to prevent code updates from retriggering a build env update
-# Also makes it look neater :)
-FROM debian:12-slim AS builder
+FROM ghcr.io/astral-sh/uv:trixie-slim AS builder
 
-RUN apt-get update && apt-get install --no-install-suggests --no-install-recommends --yes pipenv
-ADD https://github.com/pyenv/pyenv.git#v2.6.11 /pyenv/
+ENV UV_PYTHON_INSTALL_DIR=/python UV_PYTHON_CACHE_DIR=/root/.cache/uv/python
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_PREFERENCE=only-managed
 
+RUN uv python install 3.12
 
-# Stage 2: Configure the Python venv
-FROM builder AS builder-pipenv
-
-ENV PIPENV_VENV_IN_PROJECT=1
-ENV PYENV_ROOT=/pyenv/
-
-COPY Pipfile /app/
 WORKDIR /app
 
-RUN pipenv install --skip-lock
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --frozen --no-dev --no-install-project
 
 
-# Stage 3: Run in a distroless image
-# Reduces final image size & removes anything not required for running the app itself
-# Less size, less points of traversal, less problems
-FROM gcr.io/distroless/python3-debian12
+FROM gcr.io/distroless/python3-debian13
 
 LABEL org.opencontainers.image.title="Discord to Keycloak Role Sync"
 LABEL org.opencontainers.image.description="Synchronises membership of Discord roles to Keycloak groups"
@@ -31,8 +22,13 @@ LABEL org.opencontainers.image.authors="Ike Johnson-Woods <contact@ike.au>"
 LABEL org.opencontainers.image.source=https://github.com/NotActuallyTerry/discord-keycloak-rolesync
 LABEL org.opencontainers.image.license=MPL-2.0
 
-COPY --from=builder-pipenv /app/.venv/ /venv/
+COPY --from=builder /python /python
+COPY --from=builder /app /app
+
 COPY app.py /app/app.py
 WORKDIR /app
 
-ENTRYPOINT ["/venv/bin/python", "app.py"]
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["python", "app.py"]
